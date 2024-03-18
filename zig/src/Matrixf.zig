@@ -42,6 +42,30 @@ pub fn Matrixf(comptime T: type) type {
     return struct {
         header: [7]u8 = undefined,
 
+        fn writeRow(data: []T, file: *const File, bytes: usize) !void {
+            const ptr: [*]u8 = @ptrCast(@alignCast(data.ptr));
+            try file.writeAll(ptr[0..bytes]);
+            return;
+        }
+
+        fn writeMat(self: *@This(), file: *const File, data: [][]T, nrow: u16, ncol: u16) !void {
+            inline for (&self.header, .{
+                head,
+                bits,
+                @as(u8, @truncate(nrow >> 8)),
+                @as(u8, @truncate(nrow)),
+                @as(u8, @truncate(ncol >> 8)),
+                @as(u8, @truncate(ncol)),
+                0x0a,
+            }) |*ptr, val| ptr.* = val;
+
+            try file.writeAll(&self.header);
+
+            const bytes: usize = size * ncol;
+            for (data) |row| try writeRow(row, file, bytes);
+            return;
+        }
+
         fn checkBuffer(buff: [][]T) !MatInfo {
             const nrow: usize = buff.len;
             const ncol: usize = buff[0].len;
@@ -51,23 +75,23 @@ pub fn Matrixf(comptime T: type) type {
             return .{ .nrow = nrow, .ncol = ncol };
         }
 
-        fn checkHeader(header: *[7]u8, info: *const MatInfo, file: *const File) !void {
+        fn checkHeader(header: *[7]u8, file: *const File, info: *const MatInfo) !void {
             const read: usize = try file.readAll(header);
             if (read != 7 or header[6] != 0x0a) return error.HeaderFormatError;
 
             if (header[0] != head or header[1] != bits) return error.BuffTypeError;
 
-            const nrow: u16 = (header[2] << 4) | header[3];
+            const nrow: u16 = (@as(u16, header[2]) << 8) | header[3];
             if (nrow != info.nrow) return error.BuffSizeError;
 
-            const ncol: u16 = (header[4] << 4) | header[5];
+            const ncol: u16 = (@as(u16, header[4]) << 8) | header[5];
             if (ncol != info.ncol) return error.BuffSizeError;
 
             return;
         }
 
         // This function can be spawned by threads.
-        fn readRow(buff: []T, bytes: usize, file: *const File) !void {
+        fn readRow(buff: []T, file: *const File, bytes: usize) !void {
             const ptr: [*]u8 = @ptrCast(@alignCast(buff.ptr));
             if (file.readAll(ptr[0..bytes])) |read| {
                 if (read != bytes) return error.ReadRowError;
@@ -75,37 +99,13 @@ pub fn Matrixf(comptime T: type) type {
             return;
         }
 
-        fn writeRow(data: []T, bytes: usize, file: *const File) !void {
-            const ptr: [*]u8 = @ptrCast(@alignCast(data.ptr));
-            try file.writeAll(ptr[0..bytes]);
-            return;
-        }
-
-        fn writeMat(self: *@This(), nrow: u16, ncol: u16, data: [][]T, file: *const File) !void {
-            inline for (&self.header, .{
-                head,
-                bits,
-                @as(u8, @truncate(nrow >> 4)),
-                @as(u8, @truncate(nrow & 0xff)),
-                @as(u8, @truncate(ncol >> 4)),
-                @as(u8, @truncate(ncol & 0xff)),
-                0x0a,
-            }) |*ptr, val| ptr.* = val;
-
-            try file.writeAll(&self.header);
-
-            const bytes: usize = size * ncol;
-            for (data) |row| try writeRow(row, bytes, file);
-            return;
-        }
-
         // This function can utilize multithreading.
         fn readMat(self: *@This(), buff: [][]T, file: *const File) !void {
             const info: MatInfo = try checkBuffer(buff);
-            try checkHeader(&self.header, &info, file);
+            try checkHeader(&self.header, file, &info);
             // if (try file.getPos() != 7) unreachable;
             const bytes: usize = size * info.ncol;
-            for (buff) |row| try readRow(row, bytes, file);
+            for (buff) |row| try readRow(row, file, bytes);
             return;
         }
     };
@@ -141,7 +141,7 @@ test "MatrixIO" {
     );
 
     var io: Matrixf(f64) = .{};
-    try io.writeMat(4, 3, exported, &file);
+    try io.writeMat(&file, exported, 4, 3);
 
     const buff_im: []u8 = try page.alloc(u8, size);
     errdefer page.free(buff_im);
